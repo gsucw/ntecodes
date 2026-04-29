@@ -792,3 +792,82 @@ h3 {
 .breadcrumb a:hover { color: var(--cyan); }
 
 .breadcrumb-sep { color: var(--border-hover); }
+
+/* ---- Legal / Static Pages ---- */
+.page-shell {
+  padding: 56px 0 72px;
+}
+
+.page-hero {
+  margin-bottom: 34px;
+}
+
+.page-eyebrow {
+  color: var(--cyan);
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+
+.page-title {
+  max-width: 780px;
+  margin-bottom: 12px;
+}
+
+.page-summary {
+  max-width: 700px;
+  color: var(--text-secondary);
+  font-size: 1rem;
+}
+
+.content-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 28px;
+}
+
+.content-panel + .content-panel {
+  margin-top: 16px;
+}
+
+.content-panel h2 {
+  margin-bottom: 12px;
+}
+
+.content-panel p,
+.content-panel li {
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+}
+
+.content-panel p + p {
+  margin-top: 12px;
+}
+
+.content-panel ul {
+  margin: 12px 0 0 20px;
+}
+
+.content-panel a {
+  color: var(--cyan);
+  text-decoration: none;
+}
+
+.content-panel a:hover {
+  text-decoration: underline;
+}
+
+.last-updated {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin-top: 16px;
+}
+
+@media (max-width: 640px) {
+  .page-shell { padding: 36px 0 56px; }
+  .content-panel { padding: 22px 18px; }
+}
