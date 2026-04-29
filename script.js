@@ -3,9 +3,9 @@
 document.addEventListener('DOMContentLoaded', () => {
 
   // ── Last checked timestamp ──────────────────────────────────
-  // The site checks codes every 2 hours. Keep the HTML as a fixed UTC
-  // checkpoint, then let the browser roll it forward to the latest
-  // 2-hour UTC slot if the page has not been redeployed yet.
+  // Keep the HTML as the last code commit/deploy UTC timestamp, then let
+  // the browser roll it forward every 2 hours if the page has not been
+  // redeployed yet. Update data-last-checked-utc whenever code changes.
   const lastCheckedEl = document.getElementById('last-checked-utc');
   if (lastCheckedEl) {
     const CHECK_INTERVAL_MS = 2 * 60 * 60 * 1000;
