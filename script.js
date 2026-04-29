@@ -22,11 +22,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const htmlCheckpoint = new Date(lastCheckedEl.dataset.lastCheckedUtc);
     if (!Number.isNaN(htmlCheckpoint.getTime())) {
       const now = new Date();
-      const latestTwoHourUtcSlot = new Date(
-        Math.floor(now.getTime() / CHECK_INTERVAL_MS) * CHECK_INTERVAL_MS
-      );
-      const displayDate = now - htmlCheckpoint > CHECK_INTERVAL_MS
-        ? latestTwoHourUtcSlot
+      const elapsedMs = now.getTime() - htmlCheckpoint.getTime();
+      const intervalsElapsed = Math.max(0, Math.floor(elapsedMs / CHECK_INTERVAL_MS));
+      const displayDate = intervalsElapsed > 0
+        ? new Date(htmlCheckpoint.getTime() + intervalsElapsed * CHECK_INTERVAL_MS)
         : htmlCheckpoint;
       lastCheckedEl.textContent = formatUtc(displayDate);
     }
