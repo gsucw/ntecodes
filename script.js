@@ -2,14 +2,34 @@
 
 document.addEventListener('DOMContentLoaded', () => {
 
-  // ── Live timestamp ──────────────────────────────────────────
-  const tsEl = document.getElementById('live-timestamp');
-  if (tsEl) {
-    const fmt = d => d.toLocaleString('en-US', {
-      month: 'long', day: 'numeric', year: 'numeric',
-      hour: '2-digit', minute: '2-digit', timeZoneName: 'short'
-    });
-    tsEl.textContent = fmt(new Date());
+  // ── Last checked timestamp ──────────────────────────────────
+  // The site checks codes every 2 hours. Keep the HTML as a fixed UTC
+  // checkpoint, then let the browser roll it forward to the latest
+  // 2-hour UTC slot if the page has not been redeployed yet.
+  const lastCheckedEl = document.getElementById('last-checked-utc');
+  if (lastCheckedEl) {
+    const CHECK_INTERVAL_MS = 2 * 60 * 60 * 1000;
+    const formatUtc = d => {
+      const date = d.toLocaleDateString('en-US', {
+        month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC'
+      });
+      const time = d.toLocaleTimeString('en-GB', {
+        hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC'
+      });
+      return `${date}, ${time} UTC`;
+    };
+
+    const htmlCheckpoint = new Date(lastCheckedEl.dataset.lastCheckedUtc);
+    if (!Number.isNaN(htmlCheckpoint.getTime())) {
+      const now = new Date();
+      const latestTwoHourUtcSlot = new Date(
+        Math.floor(now.getTime() / CHECK_INTERVAL_MS) * CHECK_INTERVAL_MS
+      );
+      const displayDate = now - htmlCheckpoint > CHECK_INTERVAL_MS
+        ? latestTwoHourUtcSlot
+        : htmlCheckpoint;
+      lastCheckedEl.textContent = formatUtc(displayDate);
+    }
   }
 
   // ── Copy-to-clipboard ──────────────────────────────────────
