@@ -2,324 +2,222 @@
 /**
  * NTE Codes Auto-Checker
  *
- * Periodically checks known sources for new Neverness to Everness codes,
- * compares against the current list in index.html, and auto-updates timestamps.
+ * Checks multiple sources for new Neverness to Everness codes,
+ * compares against current list, and updates timestamps + pushes.
  *
- * Usage: node scripts/check-nte-codes.js
- *        node scripts/check-nte-codes.js --dry-run   # preview without changing anything
+ * Sources:
+ *   1. Pocket Tactics  (CODE - reward format)
+ *   2. ntecodes.xyz    (<div class="code-string">CODE</div> format)
  *
- * Sources checked:
- *   - https://www.pockettactics.com/neverness-to-everness/codes
- *
- * Environment: expects to be run from the ntecodes repo root.
+ * Usage:  node scripts/check-nte-codes.js [--dry-run]
  */
 
-// ── Config ──────────────────────────────────────────────────────────────────
-const SOURCES = [
-  { url: 'https://www.pockettactics.com/neverness-to-everness/codes', label: 'Pocket Tactics' },
-  // Add more sources here as they become available
-];
-
-const NTE_CODE_RE = /\b([A-Za-z0-9]{6,30})\s*[-–—]\s*(.+?)(?:\s*\(new!?\))?\s*$/gim;
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const https = require('https');
 
-const REPO_ROOT = path.resolve(__dirname, '..');
-const INDEX_HTML = path.join(REPO_ROOT, 'index.html');
-const SITEMAP_XML = path.join(REPO_ROOT, 'sitemap.xml');
-const isDryRun = process.argv.includes('--dry-run');
+const ROOT = path.resolve(__dirname, '..');
+const HTML = path.join(ROOT, 'index.html');
+const SITEMAP = path.join(ROOT, 'sitemap.xml');
+const DRY = process.argv.includes('--dry-run');
 
-function nowFormatted() {
+const SOURCES = [
+  { url: 'https://www.pockettactics.com/neverness-to-everness/codes', label: 'Pocket Tactics', parser: 'pocket' },
+  { url: 'https://ntecodes.xyz/',                                      label: 'NTE Codes (live)',  parser: 'codesite' },
+];
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+function fmt() {
   const d = new Date();
-  const m = d.toLocaleDateString('en-US', { month: 'long', timeZone: 'UTC' });
-  const day = d.getUTCDate();
-  const y = d.getUTCFullYear();
-  return `${m} ${day}, ${y}`;
+  return `${d.toLocaleDateString('en-US',{month:'long',timeZone:'UTC'})} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
 }
+function iso() { return new Date().toISOString().slice(0,10); }
+function utc() { return new Date().toISOString().replace(/\.\d{3}Z$/,'Z'); }
+function log(m){ console.log(`[${new Date().toISOString().replace('T',' ').slice(0,19)}] ${m}`); }
 
-function nowISO() {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function nowUTC() {
-  const d = new Date();
-  return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
-}
-
-function log(msg) {
-  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  console.log(`[${ts}] ${msg}`);
-}
-
-// ── Fetch source ────────────────────────────────────────────────────────────
-async function fetchText(url) {
-  const http = url.startsWith('https') ? require('https') : require('http');
-  return new Promise((resolve, reject) => {
-    http.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; NTECodesBot/1.0; +https://ntecodes.xyz)',
-        'Accept': 'text/html,application/xhtml+xml',
-      },
-      timeout: 15000,
-    }, (res) => {
-      if (res.statusCode >= 400) {
-        reject(new Error(`HTTP ${res.statusCode} from ${url}`));
-        return;
+function fetch(u) {
+  return new Promise((ok, fail) => {
+    const mod = u.startsWith('https') ? https : require('http');
+    mod.get(u, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; NTECodesBot/1.0; +https://ntecodes.xyz)', 'Accept': 'text/html' },
+      timeout: 12000,
+    }, r => {
+      if (r.statusCode >= 400) { fail(new Error(`HTTP ${r.statusCode}`)); return; }
+      if (r.statusCode >= 300 && r.headers.location) {
+        const loc = r.headers.location.startsWith('http') ? r.headers.location : new URL(r.headers.location, u).href;
+        fetch(loc).then(ok).catch(fail); return;
       }
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve(data));
-    }).on('error', reject);
+      let d = ''; r.on('data', c => d += c); r.on('end', () => ok(d));
+    }).on('error', fail);
   });
 }
 
-// ── Parse codes from raw HTML ───────────────────────────────────────────────
-function parseCodeList(html) {
-  const codes = new Map();
-
-  // Strip all HTML tags to get plain text
-  const text = html
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n')
-    .replace(/<\/li>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&amp;/g, '&')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
-
-  const lines = text.split('\n');
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    // Pattern: CODE - reward description
-    // The code must be the FIRST part of the line, before a dash
-    const match = trimmed.match(/^([A-Za-z0-9]{6,30})\s*[-–—]\s*(.+)$/);
-    if (!match) continue;
-
-    const code = match[1];
-    const reward = match[2].replace(/\s*\(new!?\)\s*$/i, '').trim();
-
-    // Only accept codes that follow NTE patterns
-    if (!isLikelyNteCode(code)) continue;
-
-    if (!codes.has(code)) {
-      codes.set(code, { code, reward, source: 'Pocket Tactics' });
-    }
-  }
-
-  return codes;
+function strip(html) {
+  return html.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<style[\s\S]*?<\/style>/gi,'')
+    .replace(/<br\s*\/?>/gi,'\n').replace(/<\/p>/gi,'\n').replace(/<\/li>/gi,'\n').replace(/<[^>]+>/g,'')
+    .replace(/&amp;/g,'&').replace(/&nbsp;/g,' ');
 }
 
-// ── Check if string looks like a valid NTE code ─────────────────────────────
-function isLikelyNteCode(str) {
-  // NTE codes typically: NTEXXXXX, YHXXXXX, 504XXXXXXXXXX, or all-caps alphanumeric
-  if (/^NTE[A-Za-z0-9]+$/i.test(str) && str.length >= 6) return true;
-  if (/^YH[A-Za-z0-9]+$/i.test(str) && str.length >= 6) return true;
-  if (/^504\d+$/.test(str)) return true;
-  if (/^MIGU[A-Za-z0-9]+$/i.test(str)) return true;
-  // Generic fallback: alphanumeric, 6-20 chars
-  if (/^[A-Za-z0-9]{6,20}$/.test(str)) return true;
+function valid(code) {
+  if (/^NTE[A-Za-z0-9]+$/.test(code) && code.length >= 6) return true;
+  if (/^YH[A-Za-z0-9]+$/.test(code) && code.length >= 6) return true;
+  if (/^504\d+$/.test(code)) return true;
+  if (/^MIGU[A-Za-z0-9]+$/.test(code)) return true;
+  if (/^[A-Za-z0-9]{6,20}$/.test(code)) return true;
   return false;
 }
 
-// ── Parse our own index.html ────────────────────────────────────────────────
-function parseExistingCodes(html) {
-  const codes = new Map();
-  const cardRegex = /<article class="code-card">([\s\S]*?)<\/article>/g;
-  let match;
+// ── Parsers ─────────────────────────────────────────────────────────────────
+function parseCodes(html, type) {
+  const map = new Map();
 
-  while ((match = cardRegex.exec(html)) !== null) {
-    const card = match[1];
-    const codeMatch = card.match(/<div class="code-string">([^<]+)<\/div>/);
-    if (!codeMatch) continue;
-    const code = codeMatch[1].trim();
-    const isExpired = card.includes('status-expired');
-    const descMatch = card.match(/<div class="code-updated">([^<]*)<\/div>/);
-    const description = descMatch ? descMatch[1].trim() : '';
-    codes.set(code, { code, isExpired, description });
-  }
-
-  return codes;
-}
-
-// ── Update index.html ───────────────────────────────────────────────────────
-function updateTimestamps(html) {
-  const todayStr = nowFormatted();
-  const todayISO = nowISO();
-  const utcNow = nowUTC();
-
-  let updated = html;
-
-  // data-last-checked-utc
-  updated = updated.replace(/data-last-checked-utc="[^"]+"/, `data-last-checked-utc="${utcNow}"`);
-
-  // dateModified
-  updated = updated.replace(/"dateModified":\s*"\d{4}-\d{2}-\d{2}"/, `"dateModified": "${todayISO}"`);
-
-  // Footer date
-  updated = updated.replace(/<span id="footer-date">[^<]+<\/span>/, `<span id="footer-date">${todayStr}</span>`);
-
-  // "Updated [Month Day, Year]" in hero badge
-  updated = updated.replace(/Updated [A-Z][a-z]+ \d\d?, \d{4}/, `Updated ${todayStr}`);
-
-  // "Last verified: [Month Day, Year]"
-  updated = updated.replace(/Last verified: [A-Z][a-z]+ \d\d?, \d{4}/, `Last verified: ${todayStr}`);
-
-  // Title month/year
-  const currentMonth = new Date().toLocaleDateString('en-US', { month: 'long', timeZone: 'UTC' });
-  const currentYear = new Date().getUTCFullYear();
-
-  updated = updated.replace(
-    /<title>NTE Codes [A-Z][a-z]+ \d{4}/,
-    `<title>NTE Codes ${currentMonth} ${currentYear}`
-  );
-
-  // Month/year in page title (h1 or meta desc)
-  updated = updated.replace(
-    /(NTE Codes )[A-Z][a-z]+ \d{4}/g,
-    `$1${currentMonth} ${currentYear}`
-  );
-
-  // Sitemap lastmod
-  try {
-    if (fs.existsSync(SITEMAP_XML)) {
-      let sitemap = fs.readFileSync(SITEMAP_XML, 'utf-8');
-      sitemap = sitemap.replace(
-        /(<loc>https:\/\/ntecodes\.xyz\/<\/loc>\s*<lastmod>)\d{4}-\d{2}-\d{2}(<\/lastmod>)/,
-        `$1${todayISO}$2`
-      );
-      fs.writeFileSync(SITEMAP_XML, sitemap);
-      log('✓ Updated sitemap.xml lastmod');
+  if (type === 'codesite') {
+    // Our site: <div class="code-string">CODE</div>
+    const re = /<div class="code-string">([A-Za-z0-9]+)<\/div>/g;
+    let m; while ((m = re.exec(html))) {
+      const c = m[1].trim();
+      if (valid(c) && !map.has(c)) map.set(c, { code: c, reward: '' });
     }
-  } catch (e) {
-    log(`⚠ Could not update sitemap.xml: ${e.message}`);
+    return map;
   }
 
-  return updated;
+  // Pocket Tactics: CODE - reward description
+  const text = strip(html);
+  for (const line of text.split('\n')) {
+    const t = line.trim(); if (!t) continue;
+    const m = t.match(/^([A-Za-z0-9]{6,30})\s*[-–—]\s*(.+)$/);
+    if (!m) continue;
+    const c = m[1], r = m[2].replace(/\s*\(new!?\)\s*$/i,'').trim();
+    if (!valid(c)) continue;
+    if (!map.has(c)) map.set(c, { code: c, reward: r });
+  }
+  return map;
 }
 
-// ── Git operations ──────────────────────────────────────────────────────────
-function gitCommitAndPush(message) {
+// ── Parse local index.html ──────────────────────────────────────────────────
+function parseLocal(html) {
+  const map = new Map();
+  const re = /<article class="code-card">([\s\S]*?)<\/article>/g;
+  let m; while ((m = re.exec(html))) {
+    const card = m[1];
+    const c = (card.match(/<div class="code-string">([^<]+)<\/div>/)||[])[1];
+    if (!c) continue;
+    map.set(c.trim(), {
+      code: c.trim(),
+      isExpired: card.includes('status-expired'),
+      desc: (card.match(/<div class="code-updated">([^<]*)<\/div>/)||['',''])[1].trim(),
+    });
+  }
+  return map;
+}
+
+// ── Update timestamps ───────────────────────────────────────────────────────
+function updateTimestamps(html) {
+  const now = fmt(), i = iso(), u = utc();
+  let h = html;
+  h = h.replace(/data-last-checked-utc="[^"]+"/, `data-last-checked-utc="${u}"`);
+  h = h.replace(/"dateModified":\s*"\d{4}-\d{2}-\d{2}"/, `"dateModified": "${i}"`);
+  h = h.replace(/<span id="footer-date">[^<]+<\/span>/, `<span id="footer-date">${now}</span>`);
+  h = h.replace(/Updated [A-Z][a-z]+ \d\d?, \d{4}/g, `Updated ${now}`);
+  h = h.replace(/Last verified: [A-Z][a-z]+ \d\d?, \d{4}/g, `Last verified: ${now}`);
+
+  const month = new Date().toLocaleDateString('en-US',{month:'long',timeZone:'UTC'});
+  const year = new Date().getUTCFullYear();
+  h = h.replace(/NTE Codes [A-Z][a-z]+ \d{4}/g, `NTE Codes ${month} ${year}`);
+
   try {
-    execSync('git add -A', { cwd: REPO_ROOT, stdio: 'pipe' });
-    const diffStat = execSync('git diff --cached --stat', { cwd: REPO_ROOT, encoding: 'utf-8' });
-    log(`Changes:\n${diffStat}`);
-    execSync(`git commit -m "${message}"`, { cwd: REPO_ROOT, stdio: 'pipe' });
-    execSync('git push origin main', { cwd: REPO_ROOT, stdio: 'pipe' });
-    log('✓ Pushed successfully');
-    return true;
-  } catch (e) {
-    log(`✗ Git error: ${e.message}`);
-    return false;
+    if (fs.existsSync(SITEMAP)) {
+      let s = fs.readFileSync(SITEMAP, 'utf-8');
+      s = s.replace(/(<loc>https:\/\/ntecodes\.xyz\/<\/loc>\s*<lastmod>)\d{4}-\d{2}-\d{2}(<\/lastmod>)/, `$1${i}$2`);
+      fs.writeFileSync(SITEMAP, s); log('✓ sitemap.xml updated');
+    }
+  } catch(e) { log(`⚠ sitemap: ${e.message}`); }
+  return h;
+}
+
+// ── Git ─────────────────────────────────────────────────────────────────────
+function gitPush(msg) {
+  try {
+    execSync('git add -A', { cwd: ROOT, stdio: 'pipe' });
+    const d = execSync('git diff --cached --stat', { cwd: ROOT, encoding: 'utf-8' });
+    log(`Changes:\n${d}`);
+    execSync(`git commit -m "${msg}"`, { cwd: ROOT, stdio: 'pipe' });
+    execSync('git push origin main', { cwd: ROOT, stdio: 'pipe' });
+    log('✓ Pushed');
+  } catch(e) {
+    if (e.message.includes('nothing to commit')) { log('→ Nothing to commit'); return; }
+    log(`✗ Git: ${e.message}`);
   }
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
 async function main() {
   log('═══ NTE Codes Auto-Checker ═══');
-  log(`Dry run: ${isDryRun ? 'YES' : 'NO'}`);
+  log(`Dry run: ${DRY ? 'YES' : 'NO'}`);
 
-  if (!fs.existsSync(INDEX_HTML)) {
-    log(`✗ index.html not found at ${INDEX_HTML}`);
-    process.exit(1);
-  }
+  if (!fs.existsSync(HTML)) { log('✗ index.html not found'); process.exit(1); }
 
-  const indexContent = fs.readFileSync(INDEX_HTML, 'utf-8');
-  const existingCodes = parseExistingCodes(indexContent);
-  const activeCodes = Array.from(existingCodes.values()).filter(c => !c.isExpired);
-  const codeNames = activeCodes.map(c => c.code);
+  const idx = fs.readFileSync(HTML, 'utf-8');
+  const local = parseLocal(idx);
+  const active = [...local.values()].filter(c => !c.isExpired).map(c => c.code);
+  const expired = [...local.values()].filter(c => c.isExpired).map(c => c.code);
 
-  log(`Current: ${activeCodes.length} active codes`);
-  log(`Codes: ${codeNames.join(', ') || 'none'}`);
+  log(`Local: ${active.length} active, ${expired.length} expired`);
+  log(`Codes: ${active.join(', ') || 'none'}`);
 
-  // All unique codes from all sources
-  const allSourceCodes = new Map();
+  // Fetch sources
+  const all = new Map();
+  const results = [];
 
-  for (const source of SOURCES) {
+  for (const src of SOURCES) {
     try {
-      log(`→ Fetching ${source.label}...`);
-      const html = await fetchText(source.url);
-      const parsed = parseCodeList(html);
-      log(`  Found ${parsed.size} codes`);
-      for (const [code, data] of parsed) {
-        if (!allSourceCodes.has(code)) {
-          allSourceCodes.set(code, data);
-        }
-      }
-    } catch (e) {
-      log(`  ✗ Error: ${e.message}`);
+      log(`→ ${src.label}...`);
+      const html = await fetch(src.url);
+      const parsed = parseCodes(html, src.parser);
+      results.push({ label: src.label, count: parsed.size, codes: [...parsed.keys()], ok: true });
+      log(`  → ${parsed.size} codes`);
+      for (const [k,v] of parsed) all.set(k, v);
+    } catch(e) {
+      log(`  ✗ ${e.message}`);
+      results.push({ label: src.label, count: 0, codes: [], ok: false, error: e.message });
     }
   }
 
-  log(`Unique codes from all sources: ${allSourceCodes.size}`);
+  log(`Total unique codes: ${all.size}`);
+  for (const r of results) {
+    log(`  ${r.label}: ${r.count}${r.ok ? '' : ' (failed)'}`);
+  }
 
   // Compare
-  const existingSet = new Set(codeNames);
-  const sourceKeys = new Set(allSourceCodes.keys());
-
-  const newCodes = [];
-  for (const code of sourceKeys) {
-    if (!existingSet.has(code)) {
-      newCodes.push(code);
-    }
-  }
-
-  const missingFromSource = [];
-  for (const code of existingSet) {
-    if (!sourceKeys.has(code)) {
-      missingFromSource.push(code);
-    }
-  }
+  const activeSet = new Set(active), expiredSet = new Set(expired);
+  const newCodes = [...all.keys()].filter(c => !activeSet.has(c) && !expiredSet.has(c));
+  const missing = active.filter(c => !all.has(c));
 
   if (newCodes.length > 0) {
-    log(`✦ NEW CODES: ${newCodes.join(', ')}`);
-    for (const code of newCodes) {
-      const data = allSourceCodes.get(code);
-      log(`  ${code}: ${data.reward}`);
-    }
+    log('✦ NEW CODES:');
+    for (const c of newCodes) log(`  ${c}: ${(all.get(c)||{}).reward || '?'}`);
   }
+  if (missing.length > 0) log(`⚠ Possibly expired: ${missing.join(', ')}`);
+  if (!newCodes.length && !missing.length) log('✓ All codes match sources.');
 
-  if (missingFromSource.length > 0) {
-    log(`⚠ Missing from source (possibly expired): ${missingFromSource.join(', ')}`);
-  }
-
-  if (newCodes.length === 0 && missingFromSource.length === 0) {
-    log('✓ No code changes detected.');
-  }
-
-  // Always update timestamps when running
-  if (!isDryRun) {
+  // Update
+  if (!DRY) {
     log('→ Updating timestamps...');
-    const updated = updateTimestamps(indexContent);
-
-    if (updated !== indexContent) {
-      fs.writeFileSync(INDEX_HTML, updated);
-      const dateStr = nowFormatted();
-      let msg = `Auto-update: NTE codes ${dateStr}`;
-      if (newCodes.length > 0) msg += ` + new codes: ${newCodes.join(', ')}`;
-      gitCommitAndPush(msg);
+    const updated = updateTimestamps(idx);
+    if (updated !== idx) {
+      fs.writeFileSync(HTML, updated);
+      const msg = `Auto: NTE codes ${fmt()}${newCodes.length ? ' +'+newCodes.join(',') : ''}`;
+      gitPush(msg);
     } else {
-      log('✓ No timestamp changes (already up to date)');
+      log('✓ No changes needed.');
     }
   }
 
-  log('');
-  log('═══ Summary ═══');
-  log(`New: ${newCodes.length > 0 ? newCodes.join(', ') : 'none'}`);
-  log(`Missing (possibly expired): ${missingFromSource.length > 0 ? missingFromSource.join(', ') : 'none'}`);
-  log(`Dry run: ${isDryRun ? 'YES' : 'NO'}`);
   log('═════════════');
+  log(`Sources OK: ${results.filter(r=>r.ok).length}/${SOURCES.length}`);
+  log(`New: ${newCodes.join(', ') || 'none'}`);
+  log(`Missing: ${missing.join(', ') || 'none'}`);
 }
 
-main().catch(err => {
-  console.error('Fatal error:', err);
-  process.exit(1);
-});
+main().catch(e => { console.error('Fatal:', e); process.exit(1); });
