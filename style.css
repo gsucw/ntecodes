@@ -1,6 +1,4 @@
-/* =============================================
-   NTE CODES — Dark Premium Gaming Theme
-   ============================================= */
+/* NTE CODES — Dark Premium Gaming Theme */
 
 @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=Outfit:wght@300;400;500;600&display=swap');
 
@@ -253,55 +251,61 @@ h1 .highlight {
   margin-top: 2px;
 }
 
-/* ---- TOC ---- */
-.toc {
+/* ---- Code Description ---- */
+.code-description {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  margin: 10px 0 4px;
+  line-height: 1.6;
+  border-top: 1px solid rgba(255,255,255,0.04);
+  padding-top: 10px;
+}
+
+/* ---- Game Info Table ---- */
+.game-info-table-wrap {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 24px 28px;
-  margin-bottom: 48px;
+  overflow: hidden;
 }
 
-.toc-title {
+.game-info-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.game-info-table tr {
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+
+.game-info-table tr:last-child {
+  border-bottom: none;
+}
+
+.game-info-table td {
+  padding: 12px 20px;
+  vertical-align: top;
+}
+
+.game-info-table .gi-label {
   font-family: var(--font-display);
-  font-size: 0.75rem;
+  font-size: 0.68rem;
   font-weight: 700;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.1em;
-  margin-bottom: 14px;
+  letter-spacing: 0.08em;
+  width: 160px;
+  white-space: nowrap;
 }
 
-.toc-list {
-  list-style: none;
-  columns: 2;
-  column-gap: 24px;
-}
-
-.toc-list li { margin-bottom: 6px; }
-
-.toc-list a {
-  font-size: 0.875rem;
+.game-info-table .gi-value {
   color: var(--text-secondary);
-  text-decoration: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  transition: color 0.2s;
 }
 
-.toc-list a::before {
-  content: '';
-  display: inline-block;
-  width: 5px; height: 5px;
-  background: var(--cyan);
-  border-radius: 50%;
-  opacity: 0.5;
-  flex-shrink: 0;
+.game-info-table tr:hover td {
+  background: rgba(255,255,255,0.02);
 }
-
-.toc-list a:hover { color: var(--cyan); }
-.toc-list a:hover::before { opacity: 1; }
 
 /* ---- Sections ---- */
 section { margin-bottom: 64px; }
@@ -642,30 +646,7 @@ h3 {
   padding: 0 20px 18px;
 }
 
-/* ---- Related Searches ---- */
-.related-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
 
-.related-chip {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 100px;
-  padding: 8px 16px;
-  font-size: 0.8rem;
-  color: var(--text-secondary);
-  text-decoration: none;
-  transition: all 0.2s;
-  cursor: default;
-}
-
-.related-chip:hover {
-  border-color: var(--border-hover);
-  color: var(--cyan);
-  background: var(--cyan-dim);
-}
 
 /* ---- Trust Bar ---- */
 .trust-bar {
@@ -733,7 +714,9 @@ h3 {
 
 /* ---- Responsive ---- */
 @media (max-width: 640px) {
-  .toc-list { columns: 1; }
+  .game-info-table .gi-label { width: auto; display: block; padding-bottom: 2px; }
+  .game-info-table .gi-value { display: block; padding-top: 2px; }
+  .game-info-table td { display: block; padding: 8px 16px; }
 
   .stat-bar { flex-wrap: wrap; }
   .stat-item { flex: 1 1 45%; border-right: none; border-bottom: 1px solid var(--border); }
