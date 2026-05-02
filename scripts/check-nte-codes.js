@@ -30,7 +30,6 @@ const DRY = process.argv.includes('--dry-run');
 // The self-check (ntecodes.xyz) is for deployment consistency, not new codes.
 const SOURCES = [
   { url: 'https://www.pockettactics.com/neverness-to-everness/codes', label: 'Pocket Tactics', type: 'pocket' },
-  { url: 'https://ntecodes.xyz/',                                      label: 'Self-check',      type: 'codesite' },
 ];
 
 // ── Date helpers ────────────────────────────────────────────────────────────
