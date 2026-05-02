@@ -2,12 +2,15 @@
 /**
  * NTE Codes Auto-Checker
  *
- * Checks multiple sources for new Neverness to Everness codes,
- * compares against current list, and updates timestamps + pushes.
+ * Checks sources for new NTE codes and updates timestamps.
  *
  * Sources:
- *   1. Pocket Tactics  (CODE - reward format)
- *   2. ntecodes.xyz    (<div class="code-string">CODE</div> format)
+ *   1. Pocket Tactics (primary, server-rendered, works)
+ *   2. Self-check via ntecodes.xyz (deployment consistency)
+ *
+ * Note: Most gaming sites (GameSpot, IGN, Reddit, PCInvasion, etc.)
+ *       block our server IP via Cloudflare. Adding new sources requires
+ *       finding sites that are accessible from this server.
  *
  * Usage:  node scripts/check-nte-codes.js [--dry-run]
  */
@@ -22,12 +25,15 @@ const HTML = path.join(ROOT, 'index.html');
 const SITEMAP = path.join(ROOT, 'sitemap.xml');
 const DRY = process.argv.includes('--dry-run');
 
+// ── Sources ─────────────────────────────────────────────────────────────────
+// Pocket Tactics is the only external source our server can reliably access.
+// The self-check (ntecodes.xyz) is for deployment consistency, not new codes.
 const SOURCES = [
-  { url: 'https://www.pockettactics.com/neverness-to-everness/codes', label: 'Pocket Tactics', parser: 'pocket' },
-  { url: 'https://ntecodes.xyz/',                                      label: 'NTE Codes (live)',  parser: 'codesite' },
+  { url: 'https://www.pockettactics.com/neverness-to-everness/codes', label: 'Pocket Tactics', type: 'pocket' },
+  { url: 'https://ntecodes.xyz/',                                      label: 'Self-check',      type: 'codesite' },
 ];
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// ── Date helpers ────────────────────────────────────────────────────────────
 function fmt() {
   const d = new Date();
   return `${d.toLocaleDateString('en-US',{month:'long',timeZone:'UTC'})} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
@@ -71,9 +77,7 @@ function valid(code) {
 // ── Parsers ─────────────────────────────────────────────────────────────────
 function parseCodes(html, type) {
   const map = new Map();
-
   if (type === 'codesite') {
-    // Our site: <div class="code-string">CODE</div>
     const re = /<div class="code-string">([A-Za-z0-9]+)<\/div>/g;
     let m; while ((m = re.exec(html))) {
       const c = m[1].trim();
@@ -81,8 +85,7 @@ function parseCodes(html, type) {
     }
     return map;
   }
-
-  // Pocket Tactics: CODE - reward description
+  // pocket type
   const text = strip(html);
   for (const line of text.split('\n')) {
     const t = line.trim(); if (!t) continue;
@@ -95,7 +98,6 @@ function parseCodes(html, type) {
   return map;
 }
 
-// ── Parse local index.html ──────────────────────────────────────────────────
 function parseLocal(html) {
   const map = new Map();
   const re = /<article class="code-card">([\s\S]*?)<\/article>/g;
@@ -164,9 +166,8 @@ async function main() {
   const expired = [...local.values()].filter(c => c.isExpired).map(c => c.code);
 
   log(`Local: ${active.length} active, ${expired.length} expired`);
-  log(`Codes: ${active.join(', ') || 'none'}`);
+  log(`Current: ${active.join(', ') || 'none'}`);
 
-  // Fetch sources
   const all = new Map();
   const results = [];
 
@@ -174,22 +175,19 @@ async function main() {
     try {
       log(`→ ${src.label}...`);
       const html = await fetch(src.url);
-      const parsed = parseCodes(html, src.parser);
+      const parsed = parseCodes(html, src.type);
       results.push({ label: src.label, count: parsed.size, codes: [...parsed.keys()], ok: true });
       log(`  → ${parsed.size} codes`);
       for (const [k,v] of parsed) all.set(k, v);
     } catch(e) {
       log(`  ✗ ${e.message}`);
-      results.push({ label: src.label, count: 0, codes: [], ok: false, error: e.message });
+      results.push({ label: src.label, count: 0, codes: [], ok: false });
     }
   }
 
-  log(`Total unique codes: ${all.size}`);
-  for (const r of results) {
-    log(`  ${r.label}: ${r.count}${r.ok ? '' : ' (failed)'}`);
-  }
+  log(`Unique: ${all.size}`);
+  for (const r of results) log(`  ${r.label}: ${r.count} codes${r.ok ? '' : ' (FAILED)'}`);
 
-  // Compare
   const activeSet = new Set(active), expiredSet = new Set(expired);
   const newCodes = [...all.keys()].filter(c => !activeSet.has(c) && !expiredSet.has(c));
   const missing = active.filter(c => !all.has(c));
@@ -198,26 +196,22 @@ async function main() {
     log('✦ NEW CODES:');
     for (const c of newCodes) log(`  ${c}: ${(all.get(c)||{}).reward || '?'}`);
   }
-  if (missing.length > 0) log(`⚠ Possibly expired: ${missing.join(', ')}`);
-  if (!newCodes.length && !missing.length) log('✓ All codes match sources.');
+  if (missing.length > 0) log(`⚠ Missing from sources: ${missing.join(', ')}`);
+  if (!newCodes.length && !missing.length) log('✓ All codes match.');
 
-  // Update
   if (!DRY) {
-    log('→ Updating timestamps...');
+    log('→ Updating...');
     const updated = updateTimestamps(idx);
-    if (updated !== idx) {
+    if (updated !== idx || newCodes.length > 0 || missing.length > 0) {
       fs.writeFileSync(HTML, updated);
       const msg = `Auto: NTE codes ${fmt()}${newCodes.length ? ' +'+newCodes.join(',') : ''}`;
       gitPush(msg);
-    } else {
-      log('✓ No changes needed.');
-    }
+    } else { log('✓ No changes.'); }
   }
 
-  log('═════════════');
+  log('');
   log(`Sources OK: ${results.filter(r=>r.ok).length}/${SOURCES.length}`);
-  log(`New: ${newCodes.join(', ') || 'none'}`);
-  log(`Missing: ${missing.join(', ') || 'none'}`);
+  log(`New: ${newCodes.join(', ') || 'none'} | Missing: ${missing.join(', ') || 'none'}`);
 }
 
 main().catch(e => { console.error('Fatal:', e); process.exit(1); });
