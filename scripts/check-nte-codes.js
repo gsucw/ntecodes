@@ -2,11 +2,11 @@
 /**
  * NTE Codes Auto-Checker
  *
- * Checks sources for new NTE codes and updates timestamps.
+ * Checks sources for new NTE codes, moves expired codes to the expired list,
+ * and updates timestamps.
  *
  * Sources:
  *   1. Pocket Tactics (primary, server-rendered, works)
- *   2. Self-check via ntecodes.xyz (deployment consistency)
  *
  * Note: Most gaming sites (GameSpot, IGN, Reddit, PCInvasion, etc.)
  *       block our server IP via Cloudflare. Adding new sources requires
@@ -26,8 +26,6 @@ const SITEMAP = path.join(ROOT, 'sitemap.xml');
 const DRY = process.argv.includes('--dry-run');
 
 // ── Sources ─────────────────────────────────────────────────────────────────
-// Pocket Tactics is the only external source our server can reliably access.
-// The self-check (ntecodes.xyz) is for deployment consistency, not new codes.
 const SOURCES = [
   { url: 'https://www.pockettactics.com/neverness-to-everness/codes', label: 'Pocket Tactics', type: 'pocket' },
 ];
@@ -74,6 +72,8 @@ function valid(code) {
 }
 
 // ── Parsers ─────────────────────────────────────────────────────────────────
+
+/** Parse source HTML for code+reward pairs */
 function parseCodes(html, type) {
   const map = new Map();
   if (type === 'codesite') {
@@ -97,23 +97,291 @@ function parseCodes(html, type) {
   return map;
 }
 
-function parseLocal(html) {
-  const map = new Map();
-  const re = /<article class="code-card">([\s\S]*?)<\/article>/g;
-  let m; while ((m = re.exec(html))) {
-    const card = m[1];
-    const c = (card.match(/<div class="code-string">([^<]+)<\/div>/)||[])[1];
+/**
+ * Parse local index.html and return:
+ *   - activeCards: Map<code, {code, fullHtml, rewardHtml, rewardText, description, updated}>
+ *   - expiredCodes: Set<code>
+ */
+function parseLocalDetailed(html) {
+  const activeCards = new Map();
+  const expiredCodes = new Set();
+
+  // Find all code cards in the active section
+  // We need to locate the active-codes section's codes-grid content
+  const activeSectionMatch = html.match(/<section id="active-codes"[\s\S]*?<\/section>/i);
+  if (!activeSectionMatch) return { activeCards, expiredCodes };
+
+  const activeSection = activeSectionMatch[0];
+  const cardRe = /<article class="code-card">([\s\S]*?)<\/article>/g;
+  let m;
+  while ((m = cardRe.exec(activeSection))) {
+    const fullCard = m[0];
+    const cardBody = m[1];
+    const c = (cardBody.match(/<div class="code-string">([^<]+)<\/div>/) || [])[1];
     if (!c) continue;
-    map.set(c.trim(), {
-      code: c.trim(),
-      isExpired: card.includes('status-expired'),
-      desc: (card.match(/<div class="code-updated">([^<]*)<\/div>/)||['',''])[1].trim(),
+    const code = c.trim();
+
+    // Extract reward HTML
+    const rewardHtmlMatch = cardBody.match(/<div class="code-reward">([\s\S]*?)<\/div>/);
+    const rewardHtml = rewardHtmlMatch ? rewardHtmlMatch[1].trim() : '';
+
+    // Extract reward text (plain)
+    const rewardText = rewardHtml
+      ? strip(rewardHtml).replace(/\s+/g,' ').trim()
+      : '';
+
+    const desc = (cardBody.match(/<p class="code-description">([\s\S]*?)<\/p>/) || [])[1] || '';
+    const updated = (cardBody.match(/<div class="code-updated">([^<]*)<\/div>/) || [])[1] || '';
+
+    const isExpired = cardBody.includes('status-expired');
+
+    activeCards.set(code, {
+      code,
+      fullCard,
+      rewardHtml,
+      rewardText,
+      description: desc.trim(),
+      updated: updated.trim(),
+      isExpired,
     });
+    if (isExpired) expiredCodes.add(code);
   }
-  return map;
+
+  return { activeCards, expiredCodes };
 }
 
-// ── Update timestamps ───────────────────────────────────────────────────────
+// ── HTML manipulation ───────────────────────────────────────────────────────
+
+/**
+ * Build the expired table HTML if missing, or an <tr> row.
+ */
+function buildExpiredRow(code, rewardText) {
+  const now = fmt();
+  return `          <tr>
+            <td><span class="expired-code-str">${code}</span></td>
+            <td>${rewardText}</td>
+            <td>Expired ${now}</td>
+          </tr>`;
+}
+
+function buildExpiredTableHeader() {
+  return `<div class="expired-table-wrap">
+        <table class="expired-table">
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Rewards</th>
+              <th>Expired</th>
+            </tr>
+          </thead>
+          <tbody>
+`;
+}
+
+function buildExpiredTableFooter() {
+  return `          </tbody>
+        </table>
+      </div>`;
+}
+
+/**
+ * Generate a basic code card HTML for a new code from source.
+ * This creates a minimal card — the description is generic.
+ */
+function buildNewCodeCard(code, rewardText) {
+  const now = fmt();
+  // Format reward lines from the pocket tactice-style text (e.g. "30k fons")
+  const rewards = rewardText.split(',').map(r => r.trim()).filter(Boolean);
+  // Try to parse Annulith count for the description
+  const annulithMatch = rewardText.match(/(\d+)\s*Annulith/i);
+  const hasAnnulith = annulithMatch ? ` with ${annulithMatch[1]} Annulith` : '';
+
+  let rewardHtml = '';
+  for (const r of rewards) {
+    // Try to extract item name and quantity
+    const qtyMatch = r.match(/^([\d,.]+[kK]?)\s+(.+)$/) || r.match(/^(?:(\d+)×?)\s+(.+)$/) || ['', '', r];
+    const qty = qtyMatch[1] || '';
+    const item = qtyMatch[2] || r;
+    const icon = /\b(annulith|beetle|fons|coin|guide|dye)\b/i.test(item) ? '◈' : '◈';
+    const display = qty ? `${qty} ${item}` : item;
+    rewardHtml += `              <div class="code-reward-line"><span class="reward-icon">${icon}</span> ${display}</div>\n`;
+  }
+
+  return `          <article class="code-card">
+            <div class="code-card-top">
+              <span class="status-badge status-active">Active</span>
+            </div>
+            <div class="code-string">${code}</div>
+            <div class="code-reward">
+${rewardHtml}            </div>
+            <button class="copy-btn" data-code="${code}" aria-label="Copy code ${code}">
+              ⧉ Copy Code
+            </button>
+            <p class="code-description">New NTE code${hasAnnulith} — auto-detected from game news sources. Redeem immediately as codes may expire without notice.</p>
+            <div class="code-updated">New code — added ${now}</div>
+          </article>`;
+}
+
+/**
+ * Find the existing expired section and either:
+ * - If it has "No expired codes yet." replacement text, replace with full table
+ * - If it already has a table, append rows
+ */
+function getExpiredSectionState(html) {
+  const placeholderRe = /<div class="expired-table-wrap"[\s\S]*?<p[^>]*>[\s\S]*?No expired codes yet\.[\s\S]*?<\/p>[\s\S]*?<\/div>/i;
+  const hasPlaceholder = placeholderRe.test(html);
+
+  const tableMatch = html.match(/<section id="expired"[\s\S]*?<\/section>/i);
+  const sectionHtml = tableMatch ? tableMatch[0] : '';
+
+  return { hasPlaceholder, sectionHtml, placeholderRe };
+}
+
+// ── Update functions ────────────────────────────────────────────────────────
+
+/**
+ * Move expired codes from active section to expired table.
+ * Returns {html, moved: string[]}
+ */
+function moveExpiredToTable(html, missingCodes, activeCards, allSourceCodes) {
+  let h = html;
+  const moved = [];
+
+  if (missingCodes.length === 0) return { html: h, moved };
+
+  // Get the state of the expired section
+  const { hasPlaceholder, sectionHtml, placeholderRe } = getExpiredSectionState(h);
+
+  // Collect rows to add
+  let newRows = '';
+  for (const code of missingCodes) {
+    const card = activeCards.get(code);
+    if (!card) continue;
+
+    // Reward text: use what card has, or fallback to source
+    const rewardText = card.rewardText ||
+      (allSourceCodes.has(code) ? allSourceCodes.get(code).reward : '');
+
+    newRows += buildExpiredRow(code, rewardText) + '\n';
+    moved.push(code);
+  }
+
+  if (moved.length === 0) return { html: h, moved };
+
+  log(`→ Moving ${moved.length} expired codes to expired section: ${moved.join(', ')}`);
+
+  // Replace the placeholder with a proper table, or inject rows into existing table
+  if (hasPlaceholder) {
+    const tableHtml = buildExpiredTableHeader() + newRows + buildExpiredTableFooter();
+    h = h.replace(placeholderRe, tableHtml);
+  } else {
+    // Append rows before the closing tbody
+    const tbodyEnd = '</tbody>';
+    if (h.includes(tbodyEnd)) {
+      h = h.replace(tbodyEnd, newRows + '          ' + tbodyEnd);
+    } else {
+      // Fallback: wrap in a full table
+      const tableHtml = buildExpiredTableHeader() + newRows + buildExpiredTableFooter();
+      const expiredSectionEnd = '</section>';
+      const expiredStart = h.indexOf('<section id="expired"');
+      if (expiredStart !== -1) {
+        const sectionEnd = h.indexOf(expiredSectionEnd, expiredStart);
+        if (sectionEnd !== -1) {
+          const before = h.slice(0, sectionEnd);
+          const after = h.slice(sectionEnd);
+          // Find the last div.expired-table-wrap or the content area to replace
+          const wrapRe = /<div class="expired-table-wrap"[\s\S]*?<\/div>\s*\n\s*/;
+          h = before.replace(wrapRe, tableHtml + '\n') + after;
+        }
+      }
+    }
+  }
+
+  // Remove each expired code's card from the active section's codes-grid
+  for (const code of moved) {
+    const card = activeCards.get(code);
+    if (card && card.fullCard) {
+      // Remove the article element from codes-grid
+      const beforeLen = h.length;
+      h = h.replace(card.fullCard, '');
+      if (h.length === beforeLen) {
+        log(`⚠ Could not remove card for ${code} from active section`);
+      }
+    }
+  }
+
+  // Clean up: remove empty codes-grid or extra whitespace
+  h = h.replace(/<div class="codes-grid">\s*<\/div>/g, '<div class="codes-grid">\n          <!-- expired codes moved to expired section -->\n        </div>');
+
+  // Update active count in banner line
+  const newActiveCount = [...activeCards.keys()].filter(c => !moved.includes(c)).length;
+  // Update the active code count in the banner
+  h = h.replace(
+    /(\d+) active global codes available/,
+    `${newActiveCount} active global codes available`
+  );
+  // Update the "Redeem all X for Y Annulith" line if we can compute it
+  const totalAnnulith = computeTotalAnnulith(activeCards, moved);
+  if (totalAnnulith > 0) {
+    h = h.replace(
+      /(\d+ Annulith total)/,
+      `${totalAnnulith} Annulith total`
+    );
+  }
+
+  return { html: h, moved };
+}
+
+/**
+ * Rough estimate of total Annulith from active code rewards.
+ */
+function computeTotalAnnulith(activeCards, movedCodes) {
+  let total = 0;
+  for (const [code, card] of activeCards) {
+    if (movedCodes.includes(code)) continue;
+    const m = (card.rewardText || '').match(/(\d+)\s*Annulith/i);
+    if (m) total += parseInt(m[1], 10);
+    // Also check rewardHtml for Annulith
+    const m2 = (card.rewardHtml || '').match(/(\d+)\s*Annulith/i);
+    if (m2) total += parseInt(m2[1], 10);
+  }
+  return total;
+}
+
+/**
+ * Insert new codes from source into the active codes-grid.
+ * Returns {html, added: string[]}
+ */
+function insertNewCodes(html, newCodes, allSourceCodes, activeCards) {
+  let h = html;
+  const added = [];
+
+  if (newCodes.length === 0) return { html: h, added };
+
+  // Find the codes-grid end marker (</div> that closes the grid)
+  const codesGridEnd = '</div>\n\n        <p style="color:var(--text-muted);';
+  const gridIdx = h.indexOf(codesGridEnd);
+  if (gridIdx === -1) {
+    log('⚠ Could not find codes-grid insertion point');
+    return { html: h, added };
+  }
+
+  let insertion = '';
+  for (const code of newCodes) {
+    const src = allSourceCodes.get(code);
+    const rewardText = src ? src.reward : '';
+    const cardHtml = buildNewCodeCard(code, rewardText);
+    insertion += cardHtml + '\n\n';
+    added.push(code);
+  }
+
+  log(`→ Inserting ${added.length} new codes: ${added.join(', ')}`);
+  h = h.slice(0, gridIdx) + insertion + h.slice(gridIdx);
+
+  return { html: h, added };
+}
+
+// ── Timestamps (unchanged) ─────────────────────────────────────────────────
 function updateTimestamps(html) {
   const now = fmt(), i = iso(), u = utc();
   let h = html;
@@ -160,13 +428,17 @@ async function main() {
   if (!fs.existsSync(HTML)) { log('✗ index.html not found'); process.exit(1); }
 
   const idx = fs.readFileSync(HTML, 'utf-8');
-  const local = parseLocal(idx);
-  const active = [...local.values()].filter(c => !c.isExpired).map(c => c.code);
-  const expired = [...local.values()].filter(c => c.isExpired).map(c => c.code);
+
+  // Parse local state (detailed)
+  const { activeCards, expiredCodes } = parseLocalDetailed(idx);
+  const active = [...activeCards.values()].filter(c => !c.isExpired).map(c => c.code);
+  const expired = [...expiredCodes];
 
   log(`Local: ${active.length} active, ${expired.length} expired`);
-  log(`Current: ${active.join(', ') || 'none'}`);
+  log(`Active: ${active.join(', ') || 'none'}`);
+  if (expired.length) log(`Expired: ${expired.join(', ')}`);
 
+  // Fetch sources
   const all = new Map();
   const results = [];
 
@@ -184,33 +456,78 @@ async function main() {
     }
   }
 
-  log(`Unique: ${all.size}`);
+  log(`Unique source codes: ${all.size}`);
   for (const r of results) log(`  ${r.label}: ${r.count} codes${r.ok ? '' : ' (FAILED)'}`);
 
-  const activeSet = new Set(active), expiredSet = new Set(expired);
+  const activeSet = new Set(active);
+  const expiredSet = new Set(expired);
+
+  // Codes on source but not locally active or expired → new codes to add
   const newCodes = [...all.keys()].filter(c => !activeSet.has(c) && !expiredSet.has(c));
+
+  // Codes locally active but missing from source → likely expired
   const missing = active.filter(c => !all.has(c));
 
   if (newCodes.length > 0) {
-    log('✦ NEW CODES:');
+    log('✦ NEW CODES from source:');
     for (const c of newCodes) log(`  ${c}: ${(all.get(c)||{}).reward || '?'}`);
   }
-  if (missing.length > 0) log(`⚠ Missing from sources: ${missing.join(', ')}`);
-  if (!newCodes.length && !missing.length) log('✓ All codes match.');
+  if (missing.length > 0) {
+    log('⚠ CODES MISSING FROM SOURCE (likely expired):');
+    for (const c of missing) log(`  ${c}`);
+  }
+  if (!newCodes.length && !missing.length) log('✓ All codes match source.');
 
-  if (!DRY) {
-    log('→ Updating...');
-    const updated = updateTimestamps(idx);
-    if (updated !== idx || newCodes.length > 0 || missing.length > 0) {
+  let updated = idx;
+  let changed = false;
+  let added = [];
+  let moved = [];
+
+  if (!DRY && (newCodes.length > 0 || missing.length > 0)) {
+    log('→ Updating HTML...');
+
+    // 1. Move expired codes to expired section
+    if (missing.length > 0) {
+      const result = moveExpiredToTable(updated, missing, activeCards, all);
+      updated = result.html;
+      moved = result.moved;
+      if (moved.length > 0) changed = true;
+    }
+
+    // 2. Insert new codes
+    if (newCodes.length > 0) {
+      // Re-parse to get updated active cards after moves
+      const { activeCards: updatedCards } = parseLocalDetailed(updated);
+      const result = insertNewCodes(updated, newCodes, all, updatedCards);
+      updated = result.html;
+      added = result.added;
+      if (added.length > 0) changed = true;
+    }
+
+    // 3. Update timestamps (always, to keep last-checked current)
+    const tsUpdated = updateTimestamps(updated);
+    if (tsUpdated !== updated) changed = true;
+    updated = tsUpdated;
+
+    if (changed) {
       fs.writeFileSync(HTML, updated);
-      const msg = `Auto: NTE codes ${fmt()}${newCodes.length ? ' +'+newCodes.join(',') : ''}`;
+      log('✓ index.html written');
+
+      // Build commit message
+      const parts = [];
+      if (added.length) parts.push('+' + added.join(','));
+      if (moved.length) parts.push('expired:' + moved.join(','));
+      const detail = parts.length ? ` (${parts.join('; ')})` : '';
+      const msg = `Auto: NTE codes ${fmt()}${detail}`;
       gitPush(msg);
-    } else { log('✓ No changes.'); }
+    } else {
+      log('✓ No changes to commit.');
+    }
   }
 
   log('');
   log(`Sources OK: ${results.filter(r=>r.ok).length}/${SOURCES.length}`);
-  log(`New: ${newCodes.join(', ') || 'none'} | Missing: ${missing.join(', ') || 'none'}`);
+  log(`New: ${added.join(', ') || 'none'} | Expired: ${moved.join(', ') || 'none'}`);
 }
 
 main().catch(e => { console.error('Fatal:', e); process.exit(1); });
