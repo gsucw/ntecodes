@@ -378,6 +378,14 @@ function insertNewCodes(html, newCodes, allSourceCodes, activeCards) {
   log(`→ Inserting ${added.length} new codes: ${added.join(', ')}`);
   h = h.slice(0, gridIdx) + insertion + h.slice(gridIdx);
 
+  // Update active count in banner
+  const prevActive = [...activeCards.values()].filter(c => !c.isExpired).length;
+  const newCount = prevActive + added.length;
+  h = h.replace(
+    /(\d+) active global codes available/,
+    `${newCount} active global codes available`
+  );
+
   return { html: h, added };
 }
 
