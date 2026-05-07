@@ -217,7 +217,6 @@ ${rewardHtml}            </div>
             <button class="copy-btn" data-code="${code}" aria-label="Copy code ${code}">
               ⧉ Copy Code
             </button>
-            <p class="code-description">New NTE code${hasAnnulith} — auto-detected from game news sources. Redeem immediately as codes may expire without notice.</p>
             <div class="code-updated">New code — added ${now}</div>
           </article>`;
 }
